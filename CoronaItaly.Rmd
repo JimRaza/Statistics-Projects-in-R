@@ -1,6 +1,6 @@
 ---
 title: "Modelling of Coronavirus Data from Italy using Count Time Series Models"
-output: html_document
+output: rmarkdown::github_document html_document html_document html_document
 ---
 
 ```{r setup, include=FALSE}
