@@ -1,0 +1,591 @@
+---
+title: "A Multivariate Discrete Count Time-Series Analysis of Corona Infections Data from Italy"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+## Introduction
+
+In the previous work I studied the univariate time-series formed from the aggregation of all the new infections time-series from the various regions of Italy.  I extend the work of the previous project to a multivariate discrete count time-series analysis of the same data. The multivariate model fit to the mean of the discrete data is of the following form:
+
+$$
+ \mu_{it} = e_{it}\nu_{it} + \lambda_{it} Y_{i, t-1} + \phi_{it} \sum_{j \neq i} w_{ji}Y_{j,t-1}
+$$
+
+where  $i = 1, \ldots,I$ l are the various regions of Italy and $t = 1, \ldots, T$ are times. The model has two parts. An endemic part consisting of the first term and a epidemic part consisting of the remaining two terms.The endemic term represent either background infections or infections transmitted from outside of the study region i.e. Italy. The second term models autoregressive effects from the previous day and the third term models both spatial and temporal influences  from different regions at the previous time step. The model also contains an over dispersion parameter $\psi_i > 0$ and the conditional mean is given by $\mu_{it}(1+ \psi_{it} \mu_{it})$. The term $e_{it}$ in the endemic part is the expected number of counts.
+
+
+
+
+The model allows for log linear predictors of all three components:
+
+$$
+\log(\nu_{it})= \alpha_{i}^{(\phi)} + \beta^{(\phi)T} z_{it^{^\phi}}
+$$
+$$
+\log(\lambda_{it})= \alpha_{i}^{(\nu)} + \beta^{(\nu)T} z_{it^{^\nu}}
+$$
+$$
+\log(\phi_{it})= \alpha_{i}^{(\lambda)} + \beta^{(\lambda)T} z_{it^{^\lambda}}
+$$
+
+Finally, the $w_{ij}$ variable in the third term reflects the coupling between region $j$ and region $i$. It can be set manually (for instance only allowing infections to arrive from neighboring regions) or it can be estimated as a parameter of the model.
+
+
+
+
+
+## The R Package Surveillance
+
+The R **surveillance** package provides the $\tt{hhh4}$ function that fits the above model to count data using a penalized maximum likelihood procedure. The function takes input data in the form of an $\tt{sts}$ (**surveillance** time series) object. This $\tt{sts}$ object is formed from three matrices: a $T \times  I$ matrix of observed counts; an $I \times I$ neighborhood matrix quantifying the coupling between the regions or units; and a matrix of population fractions for each region. The neighborhood matrix can be generated from a map  of the country and its districts in the form of a $\tt{SpatialPolygons}$ object.
+
+## Corona Data Preparation
+
+We load the Corona data and the tidyverse package for data manipulation, select the columns we need and group the data by region. This data preparation task is of secondary importance for our purposes and so I will not give lengthy explanations. This section can be skipped. The next section on modelling may be of more interest
+
+
+Loading some needed packages and the Corona data for Italy
+```{r}
+library("tidyverse")
+library("lubridate")
+
+finalpdf <- read_csv("covid19_italy_region3.csv") %>%
+select( Date, RegionName, NewPositiveCases) %>%
+mutate( Date = dmy_hm(Date)) %>%
+mutate(Date = date(Date)) %>%
+group_by(RegionName)
+
+finalpdf
+
+```
+
+```{r}
+finalpdf2 <- select(finalpdf, Date, RegionName, NewPositiveCases)
+#finalpdf <- t(finalpdf)
+finalpdf2
+```
+
+The $\tt{hhh4}$ function needs the data in the form of a matrix with regions along the rows and time along the columns
+```{r}
+
+wide <- pivot_wider(finalpdf2, names_from = RegionName, values_from = (NewPositiveCases))
+
+```
+```{r}
+#wide <- mutate(wide, NewProvince = ["P. A. Trento"] + Liguria)
+rep <- list(0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0)
+wide %>% replace_na( replace=rep)
+wide
+```
+
+Reading the map data from a shapefile and generating a $\tt{SpatialPolygons}$ representation of the map of Italy and its regions. The **surveillance** package sometimes has problems with Islands therefore I have removed Sicily and Sardinia
+
+```{r}
+library(rgdal)
+italfullmap<-readOGR(dsn="C:/Users/jamil/Documents/Italy",layer="ITA_adm1",verbose=TRUE)
+italmap = subset(italfullmap, NAME_1 != c("Sicily", "Sardegna"))
+plot(italmap,col="light green")
+
+```
+
+We want to analyze the Corona data by region. There are 20 regions of Italy, but I have removed 2 leaving 18, as we can see from the $\tt{SpatialPolygons}$ object.
+
+
+```{r}
+mapnames <-italmap@data[,"NAME_1"][1:18]
+mapnames
+```
+
+However, our Corona data for Italy has 22 entries rather than 20 (including the 2 islands)
+
+
+```{r}
+cols <- colnames(wide)[1:22]
+wide
+cols <- sort(cols)
+cols
+
+```
+
+We observe that not only does the corona data set seem to have 20 regions instead of the 18 we expect, the spellings often do not match those from the shape file. On closer inspection we observe that corona dataset has split the infections data for the region of Trentino-Alto Adige has been split into two datasets for its constituent provinces P.A. Bolzano and P. A. Trento. To be consistent with the map data extracted from the shape file this data will need to be recombined to form a column for the single Trentino-Alto Adige region.
+
+Further, we need to alter name spellings to match the shape file.
+
+```{r}
+wide$`Friuli V.G.`
+
+wide <- rename(wide, P_A_Bol = `P.A. Bolzano`)
+
+wide <- rename(wide, P_A_Tren = `P.A. Trento`)
+
+wide <- rename(wide, Valle_A = `'Valle d''Aosta'`)
+
+#wide <- rename(wide, V_G = `Friuli V.G.`) Does not work for some reason
+
+wide <-select(wide, Date:Veneto)
+
+wide <-select(wide, -Sicilia, -Sardegna)
+
+
+
+wide$`P_A_Tren`
+
+wide
+```
+
+Observe that there has been a replication of the column for Friuli Venezia Giullia under different names
+
+```{r}
+unique(finalpdf$RegionName)
+```
+
+Upon examining the entry for Friuli V. G. we see it contains no data, so we will remove it.
+
+
+```{r}
+VG  <- filter(finalpdf, RegionName == "Friuli V. G.")
+Venezia <- filter(finalpdf,RegionName == "Friuli Venezia Giulia")
+
+VG
+
+
+```
+
+Carrying out the combining and other data manipulations
+
+```{r}
+wide <- mutate(wide, Trentino_Alto = P_A_Bol + P_A_Tren)
+wide <- select(wide,-Date, -P_A_Bol, -P_A_Tren,)
+#wide <- replace( is.na(wide), 0)
+wide[is.na(wide)] <- 0
+cols <- colnames(wide)[1:18]
+wide
+cols <- sort(cols)
+cols
+
+```
+
+
+
+
+```{r}
+mapnames <-italmap@data[,"NAME_1"][1:18]
+mapnames
+```
+
+
+Renaming the columns of the corona dataframe to match those of the map object
+```{r}
+wide <- wide %>% rename(Apulia = Puglia)
+wide <- wide %>% rename(`Friuli-Venezia Giulia` = `Friuli Venezia Giulia` )
+wide <- wide %>% rename(`Trentino-Alto Adige` = `Trentino_Alto`, `Emilia-Romagna` = `Emilia Romagna` )
+wide <- wide %>% rename(`Valle d'Aosta` = `Valle_A`)
+
+cols <- colnames(wide)[1:18]
+(cols)
+```
+Now we see the column names match, However, the orders of the columns do not. When we build the data matrix we will have to ensure the column orders match too by arranging them in alphabetical order
+
+```{r}
+ready <- wide[1:34,1:18]
+#names(ready) <- NULL
+ready <- as.matrix(ready)
+
+ready <- ready[, order(colnames(ready))]
+
+```
+
+
+```{r}
+colsfinal <- colnames(ready)
+#colsfinal
+```
+
+There are negative counts in the data which must be mistakes and those are changed to positive values,
+
+```{r}
+ready <- ifelse(ready <0 , -ready, ready)
+```
+
+
+The final matrix
+
+```{r}
+ ready 
+```
+
+
+For the modelling we need the population fraction in each region Italy. This data is input manually into a list.
+
+
+Next I generate a matrix of population fractions for each region
+
+```{r}
+pop <- list ("Abruzzo" = 1311580, "Apulia"= 4029053 , "Basilicata" = 562869,  "Calabria" = 1947131 , "Campania" = 5801692, "Emilia-Romagna" = 4459477 , "Friuli-Venezia Giulia" = 1215220, "Lazio" = 5879082   ,  "Liguria" = 1550640 ,"Lombardia" = 10060574  ,   "Marche" = 1525271     ,      "Molise" = 305617   ,  "Piemonte" = 4356406   ,  "Toscana" = 3729641 ,"Trentino-Alto Adige" = 1072276   ,     "Umbria" =883015    ,           "Valle d'Aosta" = 125666 ,             "Veneto" = 4905894  )
+
+
+poptibble <- as_tibble(pop)
+poptibble
+#(colnames(poptibble))
+```
+
+
+This time constant matrix of population fractions for each region that is the final componented need to form an $\tt{sts}$ object.
+
+
+```{r}
+popnames <-names(pop)
+
+popmat <- unlist(pop, use.names=FALSE )
+
+
+sumpop <- sum(popmat)
+
+
+popmat <- replicate(34, popmat)
+popmat <- t(popmat)
+
+italypopfrac <- popmat/sumpop
+colnames(italypopfrac) <-  c(popnames)
+#italypopfrac <- ready[, order(colnames(italypopfrac))]
+#(colnames(italypopfrac))
+```
+The data preparation task is now complete and we are ready to form an $\tt{sts}$ ojbect,
+
+## Data Modelling and Analysis
+
+We model our data using the following  simplified version of the general model described earlier:
+
+$$
+\mu_{it} = e_{i}\nu_{i} + \lambda_{it} Y_{i, t-1} + \phi_{} \sum_{j \neq i} w_{ji}Y_{j,t-1}
+$$
+The endemic component consists of an intercept, a trend and a periodic component
+
+$$
+\log(\nu_t) = \alpha^{(\nu)} + \beta_t t + \gamma \sin(\omega t) + \delta \cos(\omega t)
+$$
+
+
+The $\tt{hhh4}$ modelling function accepts input data in the form of **surveillance** time series object $\tt{sts}$, To form an $\tt{sts}$ one  needs, among other things, a matrix of adjacency orders for the regions. We can obtain this matrix using the spdep package and a map of Italy as a $\tt{SpatialPolygons}$ object. 
+
+
+I form the adjacency matrix using the nbOrder and poly2adjmat functions and manually add column and row names
+
+```{r}
+library("surveillance") 
+library("spdep")
+
+
+
+
+italy_nborder <- nbOrder(poly2adjmat(italmap, zero.policy = TRUE), maxlag =5)
+
+
+colnames(italy_nborder) <-  c(popnames)
+rownames(italy_nborder) <- c(popnames)
+```
+
+Next, I  create an R time-series object
+
+```{r}
+# create daily time series object
+inds <- seq(as.Date("2020-03-01"), as.Date("2020-04-07"), by = "day")
+
+# names need to be manually set for some reason
+row.names(italmap) <- (colnames(italypopfrac))
+```
+
+From the time-series object, $\tt{ts}$ , I form a **surveillance** time-series object ($\tt{sts}$)
+
+```{r}
+# finally create sts objecct
+italycorona <- sts(observed = ready, start= c(2020, as.numeric(format(inds[1], "%j"))), frequency = 365, neighbourhood = italy_nborder, map = italmap, population = italypopfrac)
+
+```
+
+
+
+
+Next I display the aggregated new infections time series of all Italy (less its Islands) and a map indicating disease incidence
+
+
+```{r} 
+plot(italycorona, type = observed ~ time)
+
+popu <- unlist(pop, use.names = TRUE)
+popu
+
+italycorona@map$POPULATION <- popu
+
+plot(italycorona, type = observed ~ unit,
+  population = italycorona@map$POPULATION/100000,
+  labels = list(font = 2), colorkey = list(space = "right"),
+  sp.layout = layout.scalebar(italycorona@map, corner = c(0.05, 0.05),
+    scale = 50, labels = c("0", "50 km"), height = 0.7))
+
+
+
+```
+The new infections time series has a trend as a result of the rapid spread of the virus. It can be seen that the north of Italy is the most affected and especially the region of Lombardy. This is almost certainly due to the presence of the major international city of Milan in Lombardy, which is a travel hub and receives many international visitors
+
+
+
+I plot the individual count time series for the nine regions with the most infections
+
+```{r}
+plot(italycorona, units = which(colSums(observed(italycorona)) > 2000 ))
+
+```
+
+
+We are now ready to fit a model to our data using the $\tt{hhh4}$ function 
+
+### Model Building with the Surveillance Package
+
+The first fit is a basic (fixed effect) model in which infections can only be passed on to next neighbor regions and the conditional distribution is a negative binomial. I assume a periodic component of weekly period in the endemic component. First the model specification, and then the model fit with a Nelder-Mead optimizer.
+
+```{r}
+coronaModel_basic <- list(
+  end = list(f = addSeason2formula(~1 + t, period = 52), #italycorona@freq),
+             offset = population(italycorona)),
+  ar = list(f = ~1),
+  ne = list(f = ~1, weights = neighbourhood(italycorona) == 1),
+  family = "NegBin1")
+
+
+optimizer <- list(stop = list(tol=1e-5, niter=200),  regression = list(method="CG"), variance = list(method="CG")) #method="Nelder-Mead" & "nlminb"
+
+coronaFit_basic <- hhh4(stsObj = italycorona, control = coronaModel_basic, optimizer )
+summary(coronaFit_basic, idx2Exp = TRUE, amplitudeShift = TRUE, maxEV = TRUE)
+```
+
+The intercept of the endemic part seems unusually large and with an unusually large error, indicating some problem with the fit. Out of curiosity let's view the periodic part of the endemic fit
+
+```{r}
+plot(coronaFit_basic, type = "season", components = "end", main = "")
+
+confint(coronaFit_basic, parm = "overdisp")
+
+```
+
+I fit another model but this time with a Poisson conditional distribution, and compute the AIC for both models
+
+
+```{r}
+AIC(coronaFit_basic, update(coronaFit_basic, family = "Poisson"))
+
+```
+The negative bionomal based model is seen to give a much better fit.
+
+A plot of the contributions of the three components of the model to the mean  function of time can help us understand the spatio-temporal dynamics of the corona infections
+
+In these plots the endemic component is in grey, the autoregressive in blue and the spatio-temporal in orange.
+```{r}
+districts2plot <- which(colSums(observed(italycorona)) > 0)
+plot(coronaFit_basic, type = "fitted", units = districts2plot, hide0s = TRUE)
+```
+
+### Interpretation of the Fitted Basic Model
+
+It seems likely that Covid-19 arrived in Milan through international travelers and then spread to the surrounding regions of Italy. In such a scenario a large endemic component would be expected for Lombardi with virtually no spatio-temporal component (because Lombardi is the main spreader of infections not a receiver of them) and a large autoregressive component from internal transmission. We would further expect to see sign significant spatio-temporal components in regions surrounding Lombardi as they receive infections from it.
+
+However, the  basic model we have fit  suggests there were a small number of external infections in Lombardi which rapidly grew threw internal transmissions. The model further suggests that a small number of infections spread to neighboring regions from Lombardi and rapidly increased with in them through internal transmission.  This seems implausible because, as discussed above, the external infections in Lombardi should be very much greater than those of other regions due to the large number of international travelers arriving there. Further, the model shows only a small spatio-temporal component in regions neighboring Lombardi. 
+
+
+
+### Incorporating Greater Spatial Interaction
+
+I now attempt to model the corona data with more complex models. The first complexity I add is scaling each district's susceptibility $\phi$ by multiplying it by  $e_{i}^{\beta_{i}}$. 
+
+```{r}
+coronaFit_nepop <- update(coronaFit_basic,
+  ne = list(f = ~log(pop)), data = list(pop = population(italycorona)))
+```
+
+Previously we just assumed a form for the weights that allowed transmission only from neighboring districts $w_{ij} = {I}(i \sim j)$. Now estimate the weight as parameters from the data, assuming a general form $w_{ij}=o_{ji}^{-d}$ where $o_{ji}$ is the adjacency order between districts $i$ and $j$ and $d$ is a parameter to be estimated. The sum of the weights is normalized to one.
+
+```{r}
+coronaFit_powerlaw <- update(coronaFit_nepop,
+  ne = list(weights = W_powerlaw(maxlag = 5)))
+
+```
+
+
+
+```{r}
+districts2plot <- which(colSums(observed(italycorona)) > 0)
+plot(coronaFit_powerlaw, type = "fitted", units = districts2plot, hide0s = TRUE)
+```
+
+### Intepretation of the Fitted Power Law Model
+
+The interpretation of the power law model is similar to the basic model but now regions around Lombardy are showing significant spatio-temporal components in their means. This is closer to what we would expect and thus this model would seem to be a better one, but only slightly.
+
+Applying the AIC to all three models which see that power law model gives a lower AIC and hence seems to be the better model.
+
+```{r}
+AIC(coronaFit_nepop, coronaFit_basic, coronaFit_powerlaw)
+```
+
+## Random Effects Models
+
+In order to model heterogeneity in the data (and especially in the case of many regions) random effects models can be useful. In this section I fit a random effects model to the corona data. In such models the intercept of the parameters is modified by adding a random effects term to the a fixed term. The random effect term is assumed to have a normal distribution with zero mean and a variance parameter that is to be estimated. For instance, in the log predictor the intercept for the autoregressive term becomes:
+
+$$
+\log(\lambda_i) = \alpha^{(\lambda)} + \alpha^{(\lambda)}_i
+$$
+Where $\alpha^{(\lambda)}$ is a deterministic parameter and  $\alpha^{(\lambda)}_i$ is normally distributed
+
+$$
+\alpha^{(\lambda)}_i \sim \mathcal{N}(0,\,\sigma_{\nu}^{2})
+$$
+
+
+Fitting this random effects model
+
+```{r}
+coronaFit_ri <- update(coronaFit_powerlaw,
+  end = list(f = update(formula(coronaFit_powerlaw)$end, ~. + ri() - 1)),
+  ar  = list(f = update(formula(coronaFit_powerlaw)$ar,  ~. + ri() - 1)),
+  ne  = list(f = update(formula(coronaFit_powerlaw)$ne,  ~. + ri() - 1)),niter=200, verbose = FALSE )
+summary(coronaFit_ri, amplitudeShift = TRUE, maxEV = TRUE)
+```
+Plotting the intercepts of the fitted random effects model, in the order of autogressive, spatio-temporal and endemic
+
+```{r}
+head(ranef(coronaFit_ri, tomatrix = TRUE), n = 3)
+
+#stopifnot(ranef(coronaFit_ri) > -1.6, ranef(coronaFit_ri) < 1.6)
+for (comp in c("ar", "ne", "end")) {
+  print(plot(coronaFit_ri, type = "ri", component = comp,
+    col.regions = rev(cm.colors(100)), labels = list(cex = 0.6),
+    at = seq(-1.6, 1.6, length.out = 15)))
+}
+
+
+```
+
+Plotting the three components of the mean as functions of time (again grey is the endemic part, blue the autogressive and orange the spatio-temporal)
+
+
+
+```{r}
+
+plot(coronaFit_ri, type = "fitted", units = districts2plot, hide0s = TRUE)
+
+```
+
+### Interpretation of the Fitted Random Effects Model
+
+According to this model most of the regions of Italy were infected by external sources (e.g. international travellers) and these regions then infected Lombardi. This is almost the exact opposite of what we expect. 
+
+
+
+
+
+## Predictive Model Assessment and Validation
+
+Information criteria for model selection such as AIC are inappropriate for random effects models. Therefore I'll use a predictive assessment to judge the three competing models we now have,
+
+To get going I use one step ahead prediction on the last weeks data. This is an in sample forecast and therefore these results will be taken with some skepticism.
+```{r}
+
+tp <- c(27, 33)
+models2compare <- paste0("coronaFit_", c("basic", "powerlaw", "ri"))
+coronaPreds1 <- lapply(mget(models2compare), oneStepAhead,
+  tp = tp, type = "final")
+```
+
+
+I assess these forecasts and hence the models that made them using various scores:
+```{r}
+SCORES <- c("logs", "rps", "dss", "ses")
+coronaScores1 <- lapply(coronaPreds1, scores, which = SCORES, individual = TRUE)
+t(sapply(coronaScores1, colMeans, dims = 2))
+```
+
+The results are not completely clear. No one of the three model does the best on all of the forecasts. However, the fixed effect power law model's performance is the best overall.  
+
+Now I use genuine one step ahead forecasts for model assessment. This means that the model is refit for every new forecast. This requires greater computational power but will provide a more reliable model assessment.
+
+```{r}
+coronaPreds2 <- lapply(mget(models2compare), oneStepAhead,
+  tp = tp, type = "rolling", which.start = "final",
+  cores = 2 * (.Platform$OS.type == "unix"))
+coronaScores2 <- lapply(coronaPreds2, scores, which = SCORES, individual = TRUE)
+t(sapply(coronaScores2, colMeans, dims = 2))
+```
+
+With a full forecast the results become totally ambiguous. It is hard to select one model has performing better than the other two. 
+
+
+
+```{r}
+set.seed(321)
+sapply(SCORES, function (score) permutationTest(
+  coronaScores2$coronaFit_ri[, , score],
+  coronaScores2$coronaFit_basic[, , score]))
+```
+
+
+
+In order to further assess the quality of the models I apply calibration tests to the random effects model
+
+```{r}
+calibrationTest(coronaPreds2[["coronaFit_ri"]], which = "rps")
+```
+
+```{r}
+calibrationTest(coronaPreds2[["coronaFit_basic"]], which = "rps")
+```
+
+```{r}
+calibrationTest(coronaPreds2[["coronaFit_powerlaw"]], which = "rps")
+```
+
+
+
+In all three test we reject the null hypothesis of a calibrated forecast. This is evidence that all the models are unsatisfactory fits and explanations of the data. As a further examination of the calibration of the three model I look at the Probability Integral transform (PIT). 
+
+
+```{r}
+par(mfrow = sort(n2mfrow(length(coronaPreds2))), mar = c(4.5, 4.5, 3, 1))
+for (m in models2compare)
+  pit(coronaPreds2[[m]], plot = list(ylim = c(0, 1.25), main = m))
+
+```
+The PIT gives us insights into the deficiencies of the three models. A perfect calibration would be a sample from a uniform distribution. We see that no model attains this ideal. The predictive distributions of the basic model and the power law model have similar PITs. The form of the PIT suggests that the predictive distribution is broader than the actual distribution therefore it lacks in resolution. The Random effects model has a PIT that seems to be more even but it suggests a predictive distribution that is slightly biased to the right of the true distribution. On closer inspection this bias can be seen in the other two distributions as well. To conclude none of the model predictions calibrate well.
+
+
+
+
+## Summary and Discussion
+
+In this preliminary study I fitted multivariate discrete count time-series model to 34 days of Corona new infections data from Italy in order to understand the spread of the virus. The models were implemented in the $\tt{hhh4}$ function of the **surveillance** R package.  As expected the greatest number of infections are found in Lombardy, a region that contains the international city of Milan, and in the regions surroundings Lombardy. There are far fewer infections in the south of the country. 
+
+The model divides the mean of the count data into two main components - endemic and epidemic. The endemic component is usually attributed to background infections but could also be caused by infections from outside of the study region. In the case of the corona virus the second interpretation of the endemic component seems to be the most apt. The epidemic component of the mean is further divided into two sub components. An autoregressive component that represents new infections from within a region and a spatio-temporal component that represents new infections from neighboring regions.
+
+Within the model class several sub models were fitted in two passes. In the first pass basic fixed effects models with infections from neighboring regions and a model that allowed new infections from non neighbours. The more general model performed better on AIC and BIC model selection procedures. In the second pass a random effects model were fitted to give three competing models.
+
+The interpretations of the data using these three models are vastly different. All there interpreation seem unsatisfactory while the random effects model seems to be plain wrong.
+
+AIC and BIC are problematic when used on random effects models therefore them odels were compared using predictive validation. The prediction results of the  competing models were ambiguous with no model emerging as the winner. When applying callibrations tests all three models were found to be deficient.
+
+
+## Conclusion and Future Work
+
+I was unable to find a satisfactory fit to the Corona data using the **surveillance** package and it is not possible therefore to come to any firm conclusion about the dynamics of Corona infections in Italy. Models with widely disparate interpreations give similar predictive validations. Though one, a random effects model, seems very unlikely from other considerations.
+
+I've used only 34 days of data in order to remain consistent with the first study, however, it is necessary to redo both studies with the larger dataset. This might give less ambiguous results. However, it seem to me that the structure of the model implemented in the $\tt{hhh4}$ function of the **surveillance** has inherent limitations and that a better model probably cannot be found within this framework. The primary limitation of this class of  models seems to be that it does not a allow a periodic or a trend component in the epidemic part, only in the endemic part. A pandemic such as corona in its early stages would probably be best model as a linear trend with periodic effects due to infections caused within a region or in neighbouring regions. The exclusion of such effects in the epidemic part forces them to be either background effects or infections from outside of the study region (Italy in our case). This is a major deficiency and it may mean taking a completely different approach to modelling this data. One possibility is Kalman filter state-space models as implemented in the R package **KFAS**.
+
+I further plan on  applying Granger causality based methods to  understand the dynamics of Corona infections in Italy especially the dynamics of the interactions between the different regions.
+
+
+
+
+
+
+
+
